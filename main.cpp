@@ -1,4 +1,4 @@
-include <iostream>
+#include <iostream>
 #include <stdio.h>
 #include <cstdlib>
 #include <unistd.h>
@@ -15,7 +15,7 @@ include <iostream>
 #include <fstream>
 #include "http_parser.h"
 #include <signal.h>
-
+#include <ev.h>
 
 #define DEFAULT_BUFFER_SIZE 1024
 
@@ -68,16 +68,31 @@ int on_status(http_parser* _, const char* at, size_t length) {
     return 0;
 }
 
+void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+void read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
 
-void doprocessing (int sock) {
+void read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    if(EV_ERROR & revents) {
+        perror("got invalid event");
+        return;
+    }
+
     ssize_t recved;
     char buffer[DEFAULT_BUFFER_SIZE];
     bzero(buffer, DEFAULT_BUFFER_SIZE);
-    recved = read(sock, buffer, DEFAULT_BUFFER_SIZE);
+    recved = read(watcher->fd, buffer, DEFAULT_BUFFER_SIZE);
+    if (recved == 0) {
+        perror("Stop reading");
+        ev_io_stop(loop,watcher);
+        free(watcher);
+        return;
+    }
 
     if (recved < 0) {
         perror("ERROR reading from socket");
-        exit(1);
+        ev_io_stop(loop,watcher);
+        free(watcher);
+        return;
     }
 
     http_parser_settings in_settings;
@@ -134,12 +149,36 @@ void doprocessing (int sock) {
                 "Content-Length: "  << strlen(buf) <<  "\r\n\r\n" << string(buf);
     }
 
-    int n = write(sock, response.str().c_str(), response.str().length());
+    int n = write(watcher->fd, response.str().c_str(), response.str().length());
 
     if (n < 0) {
         perror("ERROR writing to socket\n");
         exit(1);
     }
+}
+
+void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+{
+    struct sockaddr_in cli_addr;
+    size_t cli_len = sizeof(cli_addr);
+    int newsock_fd = accept(watcher->fd, (struct sockaddr *)&cli_addr, (socklen_t*) &cli_len);
+
+    if (newsock_fd < 0) {
+        perror("ERROR on accept");
+        return;
+    }
+
+    struct ev_io *w_client = (struct ev_io*) malloc (sizeof(struct ev_io));
+    if(EV_ERROR & revents)
+    {
+        perror("got invalid event");
+        free(w_client);
+        return;
+    }
+
+    ev_io_init(w_client, read_cb, newsock_fd, EV_READ);
+    ev_io_start(loop, w_client);
+
 
 }
 
@@ -184,7 +223,7 @@ int main(int argc, char** argv) {
 
     umask(0);
     int sid = setsid();
-    if(sid < 0) {
+    if (sid < 0) {
         // Return failure
         exit(1);
     }
@@ -197,9 +236,8 @@ int main(int argc, char** argv) {
     chdir(dir.c_str());
     signal(SIGCHLD, SIG_IGN);
     //now lets start the server socket
-    int sock_fd, newsock_fd, cli_len;
-    struct sockaddr_in serv_addr, cli_addr;
-    int pid;
+    int sock_fd;
+    struct sockaddr_in serv_addr;
 
     /* First call to socket() function */
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -227,6 +265,17 @@ int main(int argc, char** argv) {
        * for the incoming connection
     */
 
-    cli_len = sizeof(cli_addr);
-    listen(sock_fd, 100);
+    listen(sock_fd, 10);
 
+    struct ev_loop *loop = ev_default_loop(0);
+
+    struct ev_io w_accept;
+
+    ev_io_init(&w_accept, accept_cb, sock_fd, EV_READ);
+    ev_io_start(loop, &w_accept);
+
+    while (1) {
+        ev_loop(loop, 0);
+    }
+    return 0;
+}

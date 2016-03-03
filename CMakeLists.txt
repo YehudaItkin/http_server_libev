@@ -13,3 +13,4 @@ set( CMAKE_RUNTIME_OUTPUT_DIRECTORY /home/box/final )
 
 
 add_executable(final  ${SOURCE_FILES})
+TARGET_LINK_LIBRARIES(final ev)
